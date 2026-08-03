@@ -33,7 +33,6 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { diffWordsWithSpace } from 'diff'
 import { Trash2 } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { Spinner } from '@/components/ui/Spinner'
@@ -94,31 +93,6 @@ function getOffset(container: Node, node: Node, offset: number): number {
   range.selectNodeContents(container)
   range.setEnd(node, offset)
   return range.toString().length
-}
-
-export function WordDiff({ before, after }: { before: string; after: string }) {
-  const parts = diffWordsWithSpace(before, after)
-  return (
-    <span>
-      {parts.map((part, i) => {
-        if (part.added) {
-          return (
-            <span key={i} className="bg-green-200/60 dark:bg-green-500/25 text-foreground">
-              {part.value}
-            </span>
-          )
-        }
-        if (part.removed) {
-          return (
-            <span key={i} className="bg-red-200/50 dark:bg-red-500/20 text-subtle line-through">
-              {part.value}
-            </span>
-          )
-        }
-        return <span key={i}>{part.value}</span>
-      })}
-    </span>
-  )
 }
 
 export function CommentableText({
@@ -368,54 +342,76 @@ export function CommentableText({
               {openCardComments.length} comment{openCardComments.length !== 1 ? 's' : ''}
             </p>
           )}
-          {openCardComments.map((c) => (
-            <div
-              key={c.id}
-              className={cn('rounded-lg border border-surface-border', compact ? 'px-2 py-1 text-xs' : 'px-3 py-2 text-sm')}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-xs px-1.5 py-0.5 rounded bg-surface text-subtle uppercase tracking-wide">
-                  {c.category}
-                </span>
-                {!readOnly && (
-                  <div className="flex items-center gap-2">
-                    {!c.corrected_output && (
+          {openCardComments.map((c) => {
+            // A revision was attempted but produced no actual change —
+            // the model's response was unusable even after a retry, so
+            // the fallback kept the prior text. Distinct from "not
+            // attempted yet" (document mode, pre-regenerate): here there
+            // IS a result, it's just not a fix, so it needs its own
+            // honest message rather than a confusing empty diff.
+            const attempted = c.corrected_output != null
+            const hasRealFix = attempted && c.corrected_output !== c.mt_output
+            return (
+              <div
+                key={c.id}
+                className={cn(
+                  'rounded-lg border border-surface-border',
+                  compact ? 'px-2 py-1 text-xs' : 'px-3 py-2 text-sm'
+                )}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs px-1.5 py-0.5 rounded bg-surface text-subtle uppercase tracking-wide">
+                    {c.category}
+                  </span>
+                  {!readOnly && (
+                    <div className="flex items-center gap-2">
+                      {!hasRealFix && (
+                        <button
+                          type="button"
+                          onClick={() => handleResolve(c.id)}
+                          className="text-xs text-subtle hover:text-brand-600"
+                        >
+                          Resolve
+                        </button>
+                      )}
                       <button
                         type="button"
-                        onClick={() => handleResolve(c.id)}
-                        className="text-xs text-subtle hover:text-brand-600"
+                        onClick={() => handleDelete(c.id)}
+                        className="text-subtle hover:text-red-500"
+                        aria-label="Delete"
                       >
-                        Resolve
+                        <Trash2 className="w-3.5 h-3.5" />
                       </button>
+                    </div>
+                  )}
+                </div>
+                <p className="text-xs text-subtle mt-1 truncate">&ldquo;{c.quoted_text}&rdquo;</p>
+                <p className="text-foreground mt-0.5">{c.comment_text}</p>
+                <p className="text-xs text-subtle mt-1">{c.created_by_name}</p>
+
+                {hasRealFix && (
+                  <div className="mt-2 pt-2 border-t border-surface-border/60">
+                    <p className="text-xs font-medium text-muted mb-1">↳ Revised to</p>
+                    <p className={cn('whitespace-pre-wrap mb-2 text-foreground', compact ? 'text-xs' : 'text-sm')}>
+                      {c.corrected_output}
+                    </p>
+                    {!readOnly && (
+                      <RatingButtons rating={c.rating ?? null} onRate={(r) => handleRate(c.id, r)} compact={compact} />
                     )}
-                    <button
-                      type="button"
-                      onClick={() => handleDelete(c.id)}
-                      className="text-subtle hover:text-red-500"
-                      aria-label="Delete"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
+                  </div>
+                )}
+
+                {attempted && !hasRealFix && (
+                  <div className="mt-2 pt-2 border-t border-surface-border/60">
+                    <p className={cn('text-amber-600 dark:text-amber-400', compact ? 'text-xs' : 'text-sm')}>
+                      Could not produce a usable fix for this. Try a clearer or more specific comment, or
+                      resolve and select the text again.
+                    </p>
                   </div>
                 )}
               </div>
-              <p className="text-xs text-subtle mt-1 truncate">&ldquo;{c.quoted_text}&rdquo;</p>
-              <p className="text-foreground mt-0.5">{c.comment_text}</p>
-              <p className="text-xs text-subtle mt-1">{c.created_by_name}</p>
-
-              {c.corrected_output && (
-                <div className="mt-2 pt-2 border-t border-surface-border/60">
-                  <p className="text-xs font-medium text-muted mb-1">↳ Revised</p>
-                  <p className={cn('whitespace-pre-wrap mb-2', compact ? 'text-xs' : 'text-sm')}>
-                    <WordDiff before={c.mt_output ?? ''} after={c.corrected_output} />
-                  </p>
-                  {!readOnly && (
-                    <RatingButtons rating={c.rating ?? null} onRate={(r) => handleRate(c.id, r)} compact={compact} />
-                  )}
-                </div>
-              )}
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
     </div>

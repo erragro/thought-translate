@@ -155,6 +155,30 @@ def _extract_json(raw: str) -> dict:
     return {}
 
 
+def _parse_indexed_replacements(raw: str) -> dict[int, str]:
+    """Expects {"replacements": [{"item": 1, "text": "..."}, ...]}. Keyed
+    by an explicit item number rather than array position — a reasoning
+    model asked to produce several replacements at once can reorder,
+    skip, or miscount its own array, and matching by position alone
+    would silently pair replacement #2 with flagged span #1's offsets,
+    splicing unrelated text into the wrong place. Returns only the
+    entries that parsed cleanly; a partial/malformed response still
+    yields whatever's usable instead of being discarded wholesale."""
+    parsed = _extract_json(raw)
+    replacements = parsed.get("replacements") if isinstance(parsed, dict) else None
+    if not isinstance(replacements, list):
+        return {}
+    result: dict[int, str] = {}
+    for entry in replacements:
+        if not isinstance(entry, dict):
+            continue
+        idx = entry.get("item")
+        text = entry.get("text")
+        if isinstance(idx, int) and isinstance(text, str) and text.strip():
+            result[idx] = text.strip()
+    return result
+
+
 def revise_translation_multi(
     source_lang: str,
     target_lang: str,
@@ -182,6 +206,17 @@ def revise_translation_multi(
     a grammar-agreement change elsewhere the fix implies — accepted for
     now given the alternative was "sometimes produces nothing at all."
 
+    Reworked 2026-08-03 after two real bugs surfaced in production use:
+    (1) matching replacements to spans by array position let a
+    reasoning model's own reordering/miscounting splice the wrong text
+    into the wrong place — fixed by having the model tag each
+    replacement with an explicit item number and matching by that
+    instead of position; (2) any single unusable response discarded the
+    ENTIRE batch, even when some items would have applied fine — fixed
+    by applying whatever items succeed independently, with a retry
+    (fresh sample, since the same model can produce a usable response
+    on a second attempt) only for the case where NOTHING parsed at all.
+
     `feedback_items`: each dict needs quoted_text, comment_text,
     category, span_start, span_end (character offsets into
     current_translation)."""
@@ -194,8 +229,9 @@ def revise_translation_multi(
         "and stay concise. Match the script and numeral style already used in the surrounding text "
         "(for example, if it's written in Roman letters, reply in Roman letters; if it uses native-script "
         "digits, keep using native-script digits). Respond with ONLY a JSON object shaped exactly like: "
-        '{"replacements": ["replacement for item 1", "replacement for item 2", ...]} '
-        "— exactly one string per flagged item listed, in the same order, no other text."
+        '{"replacements": [{"item": 1, "text": "replacement for item 1"}, {"item": 2, "text": "..."}]} '
+        "— include every item number listed below exactly once, tagged with its own number so it's clear "
+        "which replacement belongs to which flagged phrase. No other text."
     )
     items_block = "\n".join(
         f'{i + 1}. Flagged text: "{f["quoted_text"]}" — Feedback: {f["comment_text"]} ({f["category"]})'
@@ -204,47 +240,53 @@ def revise_translation_multi(
     user = (
         f"Full current translation: {current_translation}\n\n"
         f"Flagged phrases and feedback:\n{items_block}\n\n"
-        "Produce ONLY the replacement text for each flagged phrase, in order."
+        "Produce ONLY the replacement text for each flagged phrase, each tagged with its item number."
     )
-    result = client.chat(role="smart", system=system, user=user, max_tokens=4096, temperature=0.3)
-    parsed = _extract_json(result.content)
-    replacements = parsed.get("replacements") if isinstance(parsed, dict) else None
 
-    revised = current_translation
-    fallback = True
-    if isinstance(replacements, list) and len(replacements) == len(feedback_items):
-        # Apply right-to-left (by span_start descending) so an edit never
-        # shifts the offsets of an edit still waiting to be applied.
-        ordered = sorted(zip(feedback_items, replacements), key=lambda pair: pair[0]["span_start"], reverse=True)
-        text = current_translation
-        applied_ranges: list[tuple[int, int]] = []
-        for fb, repl in ordered:
-            start, end = fb["span_start"], fb["span_end"]
-            overlaps = any(not (end <= a_start or start >= a_end) for a_start, a_end in applied_ranges)
-            if overlaps or not isinstance(repl, str) or not repl.strip():
-                continue
-            if start < 0 or end > len(text) or start >= end:
-                continue
-            text = text[:start] + repl.strip() + text[end:]
-            applied_ranges.append((start, end))
-        if applied_ranges:
-            revised = text
-            fallback = False
-
-    if fallback:
+    replacements_by_item: dict[int, str] = {}
+    result = None
+    for attempt in range(2):
+        result = client.chat(role="smart", system=system, user=user, max_tokens=4096, temperature=0.3)
+        replacements_by_item = _parse_indexed_replacements(result.content)
+        if replacements_by_item:
+            break
         logger.warning(
-            "Targeted revision unusable (got %r for %d feedback items) — keeping prior translation unchanged.",
-            replacements,
-            len(feedback_items),
+            "Targeted revision attempt %d/2 produced nothing usable: %r", attempt + 1, result.content[:300]
         )
+
+    # Apply right-to-left (by span_start descending) so an edit never
+    # shifts the offsets of an edit still waiting to be applied. Each
+    # item is independent — one missing/invalid replacement just leaves
+    # that specific span untouched, not the whole batch.
+    ordered = sorted(enumerate(feedback_items, start=1), key=lambda pair: pair[1]["span_start"], reverse=True)
+    text = current_translation
+    applied_ranges: list[tuple[int, int]] = []
+    item_results = []
+    for item_num, fb in ordered:
+        repl = replacements_by_item.get(item_num)
+        start, end = fb["span_start"], fb["span_end"]
+        overlaps = any(not (end <= a_start or start >= a_end) for a_start, a_end in applied_ranges)
+        valid_span = 0 <= start < end <= len(text)
+        if repl and valid_span and not overlaps:
+            text = text[:start] + repl + text[end:]
+            applied_ranges.append((start, end))
+            item_results.append({"item": item_num, "applied": True})
+        else:
+            reason = "no_replacement" if not repl else ("overlap" if overlaps else "invalid_span")
+            item_results.append({"item": item_num, "applied": False, "reason": reason})
+
+    any_applied = bool(applied_ranges)
+    revised = text if any_applied else current_translation
+    if not any_applied:
+        logger.warning("No targeted revision applied for any of %d feedback items.", len(feedback_items))
 
     record = StageRecord(
         stage="revise",
         input_json={"current_translation": current_translation, "feedback_items": feedback_items},
-        output_json={"translation": revised, "replacements": replacements, "fallback_to_prior": fallback},
-        prompt_tokens=result.prompt_tokens,
-        completion_tokens=result.completion_tokens,
-        latency_ms=result.latency_ms,
+        output_json={"translation": revised, "item_results": item_results, "fallback_to_prior": not any_applied},
+        prompt_tokens=result.prompt_tokens if result else 0,
+        completion_tokens=result.completion_tokens if result else 0,
+        latency_ms=result.latency_ms if result else 0,
     )
     return revised, record
 
