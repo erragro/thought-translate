@@ -27,6 +27,7 @@ from app.translate.document_pipeline import (
     translate_document,
 )
 from app.translate.pipeline import revise_translation, run_pipeline
+from app.translate.sarvam_client import MAX_TRANSLATE_INPUT_CHARS
 from app.translate.service import (
     create_comment,
     delete_comment,
@@ -60,13 +61,13 @@ _SUPPORTED_OUTPUT_SCRIPTS = {"roman", "fully-native", "spoken-form-in-native"}
 _SUPPORTED_NUMERALS_FORMATS = {"international", "native"}
 
 
-# Sarvam's own docs (confirmed 2026-08-03): mayura:v1's /translate input
-# is capped at 1000 characters per call. Paste mode sends the whole box
-# as one call with no chunking (unlike document mode, which already
-# splits into paragraphs/cells), so anything over this limit needs to
-# be rejected with a clear message before it ever reaches Sarvam —
-# otherwise it fails there and surfaces as a generic, misleading error.
-_MAX_PASTE_CHARS = 1000
+# Paste mode sends the whole box as one call with no sub-chunking
+# (unlike document mode, which splits into paragraphs/cells and, as of
+# this fix, further sub-splits any chunk over the limit) — so pasted
+# text over Sarvam's cap needs to be rejected with a clear message
+# before it ever reaches Sarvam, rather than failing there and
+# surfacing as a generic, misleading error.
+_MAX_PASTE_CHARS = MAX_TRANSLATE_INPUT_CHARS
 
 
 def _validate_lang_pair(source_lang: str, target_lang: str) -> None:

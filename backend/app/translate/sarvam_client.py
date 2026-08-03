@@ -38,6 +38,12 @@ _TRANSLATE_URL = "https://api.sarvam.ai/translate"
 # the bare "en"/"hi" the rest of this app uses.
 _LANGUAGE_CODES = {"en": "en-IN", "hi": "hi-IN"}
 
+# mayura:v1's hard input cap, confirmed 2026-08-03 via Sarvam's own docs
+# ("The maximum is 1000 characters for Mayura:v1"). Both paste mode
+# (routes.py) and document mode's per-chunk sub-splitting
+# (document_pipeline.py) key off this single constant.
+MAX_TRANSLATE_INPUT_CHARS = 1000
+
 
 @dataclass
 class ChatResult:

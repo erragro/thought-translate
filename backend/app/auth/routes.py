@@ -88,7 +88,13 @@ _LOCKOUT_FLAG_PREFIX = "login_locked:"
 _ACCESS_COOKIE = "tt_access"
 _REFRESH_COOKIE = "tt_refresh"
 _COOKIE_SECURE = settings.deployment_env == "production"
-_COOKIE_SAMESITE = "strict"
+# "strict" never sends the cookie on a cross-site request at all — fine
+# for local dev (localhost:5174 -> localhost:8010 is same-site despite
+# the different ports) but breaks entirely once frontend and backend are
+# on genuinely different domains (Vercel + Railway), since every request
+# after the initial login silently drops the cookie. "none" requires
+# Secure, which is already tied to the same production flag.
+_COOKIE_SAMESITE = "none" if _COOKIE_SECURE else "lax"
 
 
 class SignupRequest(BaseModel):

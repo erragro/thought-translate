@@ -27,12 +27,13 @@ document could still mean an uncomfortably long single request.
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 
 from app.translate.document_parser import ProseDocument, TableDocument
 from app.translate.pipeline import PipelineResult, StageRecord, revise_translation_multi, run_pipeline
-from app.translate.sarvam_client import get_sarvam_client
+from app.translate.sarvam_client import MAX_TRANSLATE_INPUT_CHARS, get_sarvam_client
 
 MAX_PARAGRAPHS = 100
 MAX_TEXT_CELLS = 200
@@ -68,6 +69,56 @@ class DocumentResult:
     cache_misses: int = 0
 
 
+# Splits English-punctuation sentence boundaries (source text is
+# English or Hindi pre-translation, both use these terminators) plus
+# Devanagari's danda/double-danda, in case a source paragraph is
+# itself already in Hindi.
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?॥।])\s+")
+
+
+def _chunk_text_by_limit(text: str, limit: int) -> list[str]:
+    """Paragraph/cell-level chunking (splitting by blank lines, in
+    document_parser.py) keeps each Sarvam call to one logical unit, but
+    a single paragraph can still come out longer than Sarvam's own
+    per-call character cap — a long OCR'd block of continuous text, or
+    just a long paragraph in a PDF/DOCX. Split further at sentence
+    boundaries where possible, falling back to word then hard-character
+    boundaries only if a single "sentence" or word is itself too long.
+    Returns [text] unchanged when it's already within the limit, so this
+    is a no-op for the common case."""
+    text = text.strip()
+    if len(text) <= limit:
+        return [text] if text else []
+
+    def _pack(pieces: list[str]) -> list[str]:
+        packed: list[str] = []
+        current = ""
+        for piece in pieces:
+            candidate = f"{current} {piece}".strip() if current else piece
+            if len(candidate) <= limit:
+                current = candidate
+                continue
+            if current:
+                packed.append(current)
+            current = piece if len(piece) <= limit else ""
+            if not current and piece:
+                # A single sentence/word is itself over the limit —
+                # hard-slice it as a last resort.
+                packed.extend(piece[i : i + limit] for i in range(0, len(piece), limit))
+        if current:
+            packed.append(current)
+        return packed
+
+    sentences = [s for s in _SENTENCE_SPLIT_RE.split(text) if s]
+    chunks: list[str] = []
+    for sentence in sentences:
+        if len(sentence) <= limit:
+            chunks.append(sentence)
+        else:
+            chunks.extend(_pack(sentence.split(" ")))
+    return _pack(chunks)
+
+
 def _is_numeric_or_blank(cell: str) -> bool:
     cell = cell.strip()
     if not cell:
@@ -89,21 +140,32 @@ def _run(
     output_script: str | None,
     numerals_format: str,
 ) -> str:
-    pr: PipelineResult = run_pipeline(
-        source_lang,
-        target_lang,
-        text,
-        client=client,
-        mode=mode,
-        output_script=output_script,
-        numerals_format=numerals_format,
-    )
-    result.stage_records.extend(pr.stage_records)
-    if pr.from_cache:
-        result.cache_hits += 1
-    else:
-        result.cache_misses += 1
-    return pr.translated_text
+    """Translates one paragraph/cell. A chunk that's already within
+    Sarvam's per-call character cap makes exactly one call, same as
+    before — _chunk_text_by_limit returns it unchanged. A chunk over the
+    cap (a long OCR'd block, a long PDF/DOCX paragraph) gets split
+    further and translated as multiple calls, then stitched back into
+    one string, so the paragraph-level chunking document_parser.py
+    already does is never the last line of defense against Sarvam's
+    hard limit."""
+    translated_parts: list[str] = []
+    for sub_chunk in _chunk_text_by_limit(text, MAX_TRANSLATE_INPUT_CHARS):
+        pr: PipelineResult = run_pipeline(
+            source_lang,
+            target_lang,
+            sub_chunk,
+            client=client,
+            mode=mode,
+            output_script=output_script,
+            numerals_format=numerals_format,
+        )
+        result.stage_records.extend(pr.stage_records)
+        if pr.from_cache:
+            result.cache_hits += 1
+        else:
+            result.cache_misses += 1
+        translated_parts.append(pr.translated_text)
+    return " ".join(translated_parts)
 
 
 def translate_document(
