@@ -1,0 +1,47 @@
+# ============================================================
+# Thought Translate backend — Python dependencies
+# Auth module only for now; translation-pipeline deps get added
+# when that module starts (google-genai, MCP client, etc).
+# ============================================================
+
+# Web framework
+fastapi>=0.115.0,<0.125.0
+uvicorn[standard]>=0.29.0,<0.35.0
+python-multipart>=0.0.9
+
+# Database
+sqlalchemy>=2.0.0,<3.0.0
+psycopg2-binary>=2.9.9,<3.0.0
+
+# Configuration
+pydantic>=2.7.0,<3.0.0
+pydantic-settings>=2.3.0,<3.0.0
+python-dotenv>=1.0.0,<2.0.0
+
+# Redis (rate limiting + login lockout)
+redis>=5.0.0,<6.0.0
+
+# Authentication (JWT + bcrypt)
+python-jose[cryptography]>=3.3.0,<4.0.0
+passlib[bcrypt]>=1.7.4,<2.0.0
+bcrypt>=3.2.0,<4.0.0              # pin below 4.0 — passlib 1.7.x is incompatible with bcrypt 4.x
+
+# OAuth token exchange
+httpx>=0.27.0,<1.0.0
+
+# Rate limiting
+slowapi>=0.1.9,<1.0.0
+
+# Document parsing (upload mode: PDF / Word / Excel / CSV / JPG / PNG)
+pymupdf>=1.24.0,<2.0.0            # PDF text+structure extraction, page->image rendering for OCR fallback
+python-docx>=1.1.0,<2.0.0
+openpyxl>=3.1.0,<4.0.0
+pytesseract>=0.3.10,<1.0.0        # OCR wrapper — needs the tesseract-ocr binary + language data on the host
+pillow>=10.0.0,<12.0.0
+
+# Document reconstruction (download-in-original-format)
+fpdf2>=2.7.0,<3.0.0              # PDF export — needs a Devanagari font on the host, see document_builder.py
+
+# Testing
+pytest>=8.2.0,<9.0.0
+pytest-asyncio>=0.23.0,<1.0.0
