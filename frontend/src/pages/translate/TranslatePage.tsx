@@ -64,6 +64,12 @@ const NUMERALS_OPTIONS: { value: NumeralsFormat; label: string; hint: string }[]
   { value: 'native', label: 'Native numerals', hint: 'Numbers written in the target language\'s own digits, for example २५ for 25 in Hindi.' },
 ]
 
+// Sarvam's mayura:v1 caps /translate input at 1000 characters per call
+// (confirmed 2026-08-03 via their docs). Paste mode sends the whole box
+// as one call, unlike document mode which already chunks into
+// paragraphs/cells, so this needs to be enforced here too.
+const MAX_PASTE_CHARS = 1000
+
 const ACCEPTED_EXTENSIONS = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.csv', '.jpg', '.jpeg', '.png']
 const ACCEPTED_ATTR = ACCEPTED_EXTENSIONS.join(',')
 
@@ -213,7 +219,8 @@ export default function TranslatePage() {
   }
 
   const hasInput = mode === 'paste' ? text.trim().length > 0 : file !== null
-  const canSubmit = hasInput && sourceLang !== targetLang && !loading
+  const isOverPasteLimit = mode === 'paste' && text.length > MAX_PASTE_CHARS
+  const canSubmit = hasInput && sourceLang !== targetLang && !loading && !isOverPasteLimit
 
   const handleSubmit = async () => {
     setNotice('')
@@ -388,8 +395,15 @@ export default function TranslatePage() {
               'focus:outline-none focus:ring-1 focus:ring-brand-500 focus:border-brand-500'
             )}
           />
-          <div className="flex justify-end mt-1.5">
-            <span className="text-xs text-subtle">{text.length.toLocaleString()} characters</span>
+          <div className="flex items-center justify-between mt-1.5">
+            {isOverPasteLimit && (
+              <span className="text-xs text-red-400">
+                Over the {MAX_PASTE_CHARS.toLocaleString()}-character limit, use Upload document for longer text
+              </span>
+            )}
+            <span className={cn('text-xs ml-auto', isOverPasteLimit ? 'text-red-400' : 'text-subtle')}>
+              {text.length.toLocaleString()} / {MAX_PASTE_CHARS.toLocaleString()} characters
+            </span>
           </div>
         </div>
       ) : (

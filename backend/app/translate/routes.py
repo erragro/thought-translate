@@ -60,6 +60,15 @@ _SUPPORTED_OUTPUT_SCRIPTS = {"roman", "fully-native", "spoken-form-in-native"}
 _SUPPORTED_NUMERALS_FORMATS = {"international", "native"}
 
 
+# Sarvam's own docs (confirmed 2026-08-03): mayura:v1's /translate input
+# is capped at 1000 characters per call. Paste mode sends the whole box
+# as one call with no chunking (unlike document mode, which already
+# splits into paragraphs/cells), so anything over this limit needs to
+# be rejected with a clear message before it ever reaches Sarvam —
+# otherwise it fails there and surfaces as a generic, misleading error.
+_MAX_PASTE_CHARS = 1000
+
+
 def _validate_lang_pair(source_lang: str, target_lang: str) -> None:
     if source_lang not in _SUPPORTED_LANGUAGES or target_lang not in _SUPPORTED_LANGUAGES:
         raise HTTPException(status_code=400, detail=f"Supported languages: {sorted(_SUPPORTED_LANGUAGES)}")
@@ -88,6 +97,12 @@ class TranslateRequest(BaseModel):
     def validate_text(cls, v: str) -> str:
         if not v.strip():
             raise ValueError("text must not be empty")
+        if len(v) > _MAX_PASTE_CHARS:
+            raise ValueError(
+                f"Text is {len(v)} characters, which is over the {_MAX_PASTE_CHARS}-character limit "
+                "for pasted text. Use Upload document for longer text, it's split into chunks "
+                "automatically."
+            )
         return v
 
     @field_validator("mode")
