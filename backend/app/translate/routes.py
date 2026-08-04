@@ -70,6 +70,17 @@ _SUPPORTED_NUMERALS_FORMATS = {"international", "native"}
 _MAX_PASTE_CHARS = MAX_TRANSLATE_INPUT_CHARS
 
 
+def _item_reasoning(stage_record, item_num: int) -> str:
+    """Pulls one item's reasoning out of a revise_translation_multi
+    StageRecord — the model's own one-sentence explanation for that
+    specific edit (or why it declined to make one), stored alongside
+    the correction so the UI can show it, not just the before/after."""
+    for item in stage_record.output_json.get("item_results", []):
+        if item.get("item") == item_num:
+            return item.get("reasoning") or ""
+    return ""
+
+
 def _validate_lang_pair(source_lang: str, target_lang: str) -> None:
     if source_lang not in _SUPPORTED_LANGUAGES or target_lang not in _SUPPORTED_LANGUAGES:
         raise HTTPException(status_code=400, detail=f"Supported languages: {sorted(_SUPPORTED_LANGUAGES)}")
@@ -349,6 +360,7 @@ def add_comment(
                     "comment_text": payload.comment_text,
                     "category": payload.category,
                     "created_by": user.id,
+                    "reasoning": _item_reasoning(stage_record, 1),
                 }])
             except Exception as exc:
                 logger.error("Failed to log correction example: %s", exc, exc_info=True)
@@ -543,6 +555,7 @@ def regenerate(
                 "comment_text": c["comment_text"],
                 "category": c["category"],
                 "created_by": c["created_by"],
+                "reasoning": result.comment_reasoning.get(c["id"], ""),
             })
         save_correction_examples(examples)
     except Exception as exc:

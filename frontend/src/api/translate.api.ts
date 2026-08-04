@@ -55,6 +55,10 @@ export interface Comment {
   mt_output?: string | null
   corrected_output?: string | null
   rating?: Rating | null
+  /** The model's own one-sentence explanation for this specific edit,
+   * or for why it declined to make one — shown in the UI so a reviewer
+   * can see the reasoning behind a fix, not just the result. */
+  reasoning?: string | null
 }
 
 export interface RegenerateResponse {

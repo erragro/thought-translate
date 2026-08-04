@@ -392,11 +392,18 @@ export function CommentableText({
                 {hasRealFix && (
                   <div className="mt-2 pt-2 border-t border-surface-border/60">
                     <p className="text-xs font-medium text-muted mb-1">↳ Revised to</p>
-                    <p className={cn('whitespace-pre-wrap mb-2 text-foreground', compact ? 'text-xs' : 'text-sm')}>
+                    <p className={cn('whitespace-pre-wrap text-foreground', compact ? 'text-xs' : 'text-sm')}>
                       {c.corrected_output}
                     </p>
+                    {c.reasoning && (
+                      <p className={cn('mt-1 text-subtle italic', compact ? 'text-[11px]' : 'text-xs')}>
+                        {c.reasoning}
+                      </p>
+                    )}
                     {!readOnly && (
-                      <RatingButtons rating={c.rating ?? null} onRate={(r) => handleRate(c.id, r)} compact={compact} />
+                      <div className="mt-2">
+                        <RatingButtons rating={c.rating ?? null} onRate={(r) => handleRate(c.id, r)} compact={compact} />
+                      </div>
                     )}
                   </div>
                 )}
@@ -404,8 +411,9 @@ export function CommentableText({
                 {attempted && !hasRealFix && (
                   <div className="mt-2 pt-2 border-t border-surface-border/60">
                     <p className={cn('text-amber-600 dark:text-amber-400', compact ? 'text-xs' : 'text-sm')}>
-                      Could not produce a usable fix for this. Try a clearer or more specific comment, or
-                      resolve and select the text again.
+                      {c.reasoning ||
+                        'Could not produce a usable fix for this. Try a clearer or more specific comment, or ' +
+                          'resolve and select the text again.'}
                     </p>
                   </div>
                 )}

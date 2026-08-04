@@ -155,27 +155,36 @@ def _extract_json(raw: str) -> dict:
     return {}
 
 
-def _parse_indexed_replacements(raw: str) -> dict[int, str]:
-    """Expects {"replacements": [{"item": 1, "text": "..."}, ...]}. Keyed
-    by an explicit item number rather than array position — a reasoning
-    model asked to produce several replacements at once can reorder,
-    skip, or miscount its own array, and matching by position alone
-    would silently pair replacement #2 with flagged span #1's offsets,
-    splicing unrelated text into the wrong place. Returns only the
-    entries that parsed cleanly; a partial/malformed response still
-    yields whatever's usable instead of being discarded wholesale."""
+def _parse_indexed_replacements(raw: str) -> dict[int, dict]:
+    """Expects {"replacements": [{"item": 1, "text": "...", "reasoning":
+    "...", "unchanged": false}, ...]}. Keyed by an explicit item number
+    rather than array position — a reasoning model asked to produce
+    several replacements at once can reorder, skip, or miscount its own
+    array, and matching by position alone would silently pair
+    replacement #2 with flagged span #1's offsets, splicing unrelated
+    text into the wrong place. Returns only the entries that parsed
+    cleanly; a partial/malformed response still yields whatever's
+    usable instead of being discarded wholesale. `unchanged: true` is
+    the model's own honest "I can't improve this while satisfying the
+    constraints" signal, distinct from a parse failure — its reasoning
+    is still worth keeping to show the reviewer why."""
     parsed = _extract_json(raw)
     replacements = parsed.get("replacements") if isinstance(parsed, dict) else None
     if not isinstance(replacements, list):
         return {}
-    result: dict[int, str] = {}
+    result: dict[int, dict] = {}
     for entry in replacements:
         if not isinstance(entry, dict):
             continue
         idx = entry.get("item")
         text = entry.get("text")
+        reasoning = entry.get("reasoning") if isinstance(entry.get("reasoning"), str) else ""
         if isinstance(idx, int) and isinstance(text, str) and text.strip():
-            result[idx] = text.strip()
+            result[idx] = {
+                "text": text.strip(),
+                "reasoning": reasoning.strip(),
+                "unchanged": bool(entry.get("unchanged")),
+            }
     return result
 
 
@@ -217,36 +226,73 @@ def revise_translation_multi(
     (fresh sample, since the same model can produce a usable response
     on a second attempt) only for the case where NOTHING parsed at all.
 
+    Reworked again same day for reliability and transparency: the
+    model was never actually shown `source_text` despite it being a
+    parameter — it was revising blind, working only from the target-
+    language text and a comment, with nothing to check its replacement
+    against for meaning drift. Now included in the prompt. Also added
+    explicit guardrails (address the actual feedback, preserve meaning,
+    fit grammatically as a drop-in substitution, an honest "leave
+    unchanged" escape hatch instead of forcing a bad edit) and a
+    required one-sentence `reasoning` per item, surfaced in the UI so a
+    reviewer can see why a fix was made — or wasn't.
+
     `feedback_items`: each dict needs quoted_text, comment_text,
     category, span_start, span_end (character offsets into
     current_translation)."""
     client = get_sarvam_client()
+    source_lang_name = _LANGUAGE_NAMES.get(source_lang, source_lang)
+    target_lang_name = _LANGUAGE_NAMES.get(target_lang, target_lang)
     system = (
-        f"You are given a {_LANGUAGE_NAMES.get(target_lang, target_lang)} translation and specific "
-        "feedback about certain flagged phrases within it. For EACH flagged phrase, produce ONLY its "
-        "direct replacement — do not rewrite the sentence around it. The replacement must read naturally "
-        "in place of the flagged text, use common contemporary vocabulary (not archaic or bureaucratic), "
-        "and stay concise. Match the script and numeral style already used in the surrounding text "
-        "(for example, if it's written in Roman letters, reply in Roman letters; if it uses native-script "
-        "digits, keep using native-script digits). Respond with ONLY a JSON object shaped exactly like: "
-        '{"replacements": [{"item": 1, "text": "replacement for item 1"}, {"item": 2, "text": "..."}]} '
-        "— include every item number listed below exactly once, tagged with its own number so it's clear "
-        "which replacement belongs to which flagged phrase. No other text."
+        f"You are a careful {target_lang_name} translation editor. You are given the original "
+        f"{source_lang_name} source text, the current {target_lang_name} translation, and specific "
+        "feedback about flagged phrases within that translation. For EACH flagged phrase, produce a "
+        "replacement that:\n"
+        "- Directly addresses the specific feedback given — not an arbitrary or unrelated change.\n"
+        "- Preserves the meaning in the original source text exactly — you may change tone, register, "
+        "word choice, or phrasing, but never the underlying facts, entities, numbers, dates, or intent. "
+        "This rule overrides the feedback: if the feedback asks you to change a fact, name, number, "
+        "date, or any other piece of information the source text does not actually say, you MUST "
+        "refuse that part — set \"unchanged\": true and say in your reasoning that the feedback asks "
+        "for a factual change beyond what a translation correction can do. A comment about style or "
+        "wording is not permission to invent or alter content the source never stated.\n"
+        "- Fits grammatically into the surrounding sentence (correct gender, number, case, and verb "
+        "agreement) once substituted in — it replaces ONLY the flagged phrase, everything around it "
+        "stays exactly as-is, so it must read naturally as a direct drop-in substitution, not a "
+        "rewrite of the whole sentence.\n"
+        "- Uses common contemporary vocabulary, not archaic or bureaucratic language, unless the "
+        "feedback specifically asks for a more formal register.\n"
+        "- Matches the script and numeral style already used in the surrounding text (Roman letters "
+        "vs. native script; native-script digits vs. plain digits).\n\n"
+        "If you genuinely cannot produce a replacement that satisfies both the feedback and these "
+        "constraints, set \"unchanged\": true and return the flagged phrase's own text unchanged — do "
+        "not force an edit that breaks meaning or grammar just to produce something different.\n\n"
+        "Respond with ONLY a JSON object shaped exactly like: "
+        '{"replacements": [{"item": 1, "text": "replacement for item 1", '
+        '"reasoning": "one short sentence explaining the change, or why it was left unchanged", '
+        '"unchanged": false}, ...]} '
+        "— include every item number listed below exactly once, tagged with its own number. No other text."
     )
     items_block = "\n".join(
         f'{i + 1}. Flagged text: "{f["quoted_text"]}" — Feedback: {f["comment_text"]} ({f["category"]})'
         for i, f in enumerate(feedback_items)
     )
     user = (
-        f"Full current translation: {current_translation}\n\n"
+        f"Original {source_lang_name} source text: {source_text}\n\n"
+        f"Current {target_lang_name} translation: {current_translation}\n\n"
         f"Flagged phrases and feedback:\n{items_block}\n\n"
-        "Produce ONLY the replacement text for each flagged phrase, each tagged with its item number."
+        "Produce the replacement, a one-sentence reasoning, and the unchanged flag for each flagged "
+        "phrase, each tagged with its item number."
     )
 
-    replacements_by_item: dict[int, str] = {}
+    replacements_by_item: dict[int, dict] = {}
     result = None
     for attempt in range(2):
-        result = client.chat(role="smart", system=system, user=user, max_tokens=4096, temperature=0.3)
+        # Second attempt samples fresh (higher temperature) rather than
+        # repeating the identical call — a near-deterministic retry
+        # tends to reproduce the same unusable response.
+        temperature = 0.3 if attempt == 0 else 0.6
+        result = client.chat(role="smart", system=system, user=user, max_tokens=4096, temperature=temperature)
         replacements_by_item = _parse_indexed_replacements(result.content)
         if replacements_by_item:
             break
@@ -257,23 +303,34 @@ def revise_translation_multi(
     # Apply right-to-left (by span_start descending) so an edit never
     # shifts the offsets of an edit still waiting to be applied. Each
     # item is independent — one missing/invalid replacement just leaves
-    # that specific span untouched, not the whole batch.
+    # that specific span untouched, not the whole batch. The model's
+    # own "unchanged" items are honored as-is (no edit, but a real
+    # reasoning to show), same as an item the model never returned.
     ordered = sorted(enumerate(feedback_items, start=1), key=lambda pair: pair[1]["span_start"], reverse=True)
     text = current_translation
     applied_ranges: list[tuple[int, int]] = []
     item_results = []
     for item_num, fb in ordered:
-        repl = replacements_by_item.get(item_num)
+        entry = replacements_by_item.get(item_num)
+        repl = entry["text"] if entry and not entry.get("unchanged") else None
+        reasoning = entry["reasoning"] if entry else ""
         start, end = fb["span_start"], fb["span_end"]
         overlaps = any(not (end <= a_start or start >= a_end) for a_start, a_end in applied_ranges)
         valid_span = 0 <= start < end <= len(text)
         if repl and valid_span and not overlaps:
             text = text[:start] + repl + text[end:]
             applied_ranges.append((start, end))
-            item_results.append({"item": item_num, "applied": True})
+            item_results.append({"item": item_num, "applied": True, "reasoning": reasoning})
         else:
-            reason = "no_replacement" if not repl else ("overlap" if overlaps else "invalid_span")
-            item_results.append({"item": item_num, "applied": False, "reason": reason})
+            if entry and entry.get("unchanged"):
+                reason = "model_declined"
+            elif not entry:
+                reason = "no_replacement"
+            elif overlaps:
+                reason = "overlap"
+            else:
+                reason = "invalid_span"
+            item_results.append({"item": item_num, "applied": False, "reason": reason, "reasoning": reasoning})
 
     any_applied = bool(applied_ranges)
     revised = text if any_applied else current_translation

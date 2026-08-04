@@ -110,6 +110,12 @@ def ensure_translate_tables() -> None:
             rated_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
             rated_at TIMESTAMPTZ
         );
+
+        -- The model's own one-sentence explanation for why it made (or
+        -- declined to make) this specific edit, surfaced in the UI so
+        -- a reviewer can see the reasoning behind a fix, not just the
+        -- result.
+        ALTER TABLE correction_examples ADD COLUMN IF NOT EXISTS reasoning TEXT;
     """
     try:
         with get_db_session() as session:
@@ -472,7 +478,9 @@ def save_correction_examples(examples: list[dict]) -> None:
     """Each example: thread_id, version_before_id, version_after_id,
     comment_id, chunk_index, source_lang, target_lang, source_text,
     mt_output, corrected_output, quoted_text, comment_text, category,
-    created_by. Best-effort — callers should catch and log, not let a
+    created_by, reasoning (the model's own one-sentence explanation for
+    the edit, or why it declined to make one — optional, defaults to
+    empty). Best-effort — callers should catch and log, not let a
     corpus-logging failure break the actual comment/regenerate response."""
     if not examples:
         return
@@ -483,13 +491,13 @@ def save_correction_examples(examples: list[dict]) -> None:
                     INSERT INTO correction_examples
                         (thread_id, version_before_id, version_after_id, comment_id, chunk_index,
                          source_lang, target_lang, source_text, mt_output, corrected_output,
-                         quoted_text, comment_text, category, created_by)
+                         quoted_text, comment_text, category, created_by, reasoning)
                     VALUES
                         (:thread_id, :version_before_id, :version_after_id, :comment_id, :chunk_index,
                          :source_lang, :target_lang, :source_text, :mt_output, :corrected_output,
-                         :quoted_text, :comment_text, :category, :created_by)
+                         :quoted_text, :comment_text, :category, :created_by, :reasoning)
                 """),
-                ex,
+                {**ex, "reasoning": ex.get("reasoning") or ""},
             )
 
 
@@ -525,12 +533,12 @@ def list_comments_for_thread(thread_id: int) -> list[dict]:
                 SELECT c.id, c.version_id, c.span_start, c.span_end, c.quoted_text, c.comment_text,
                        c.category, c.status, c.created_by, u.full_name AS created_by_name,
                        c.created_at, c.resolved_at, c.chunk_index,
-                       ce.mt_output, ce.corrected_output, ce.rating
+                       ce.mt_output, ce.corrected_output, ce.rating, ce.reasoning
                 FROM translation_comments c
                 JOIN translation_versions v ON v.id = c.version_id
                 JOIN users u ON u.id = c.created_by
                 LEFT JOIN LATERAL (
-                    SELECT mt_output, corrected_output, rating
+                    SELECT mt_output, corrected_output, rating, reasoning
                     FROM correction_examples ce
                     WHERE ce.comment_id = c.id
                     ORDER BY ce.created_at DESC
@@ -555,7 +563,7 @@ def list_correction_examples() -> list[dict]:
                 SELECT
                     ce.id, ce.thread_id, ce.chunk_index, ce.source_lang, ce.target_lang,
                     ce.source_text, ce.mt_output, ce.corrected_output,
-                    ce.quoted_text, ce.comment_text, ce.category,
+                    ce.quoted_text, ce.comment_text, ce.category, ce.reasoning,
                     ce.created_by, u.full_name AS created_by_name, ce.created_at,
                     ce.rating, ce.rated_at,
                     (SELECT COUNT(*) FROM correction_examples ce2

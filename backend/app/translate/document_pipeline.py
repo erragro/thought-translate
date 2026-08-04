@@ -67,6 +67,14 @@ class DocumentResult:
     stage_records: list[StageRecord] = field(default_factory=list)
     cache_hits: int = 0
     cache_misses: int = 0
+    # comment_id -> the model's one-sentence reasoning for that specific
+    # comment's edit (or why it declined one). Only populated by
+    # regenerate_*_document — a batch call combines several comments'
+    # feedback into one revise_translation_multi call, so this is where
+    # each item_results entry gets attributed back to the comment that
+    # produced it, using the exact chunk_comments ordering (item N maps
+    # to chunk_comments[N-1] by construction, not a guess).
+    comment_reasoning: dict[int, str] = field(default_factory=dict)
 
 
 # Splits English-punctuation sentence boundaries (source text is
@@ -212,6 +220,17 @@ def translate_document(
     return result
 
 
+def _attribute_reasoning(result: DocumentResult, chunk_comments: list[dict], rec: StageRecord) -> None:
+    """item N in a revise_translation_multi StageRecord corresponds to
+    chunk_comments[N-1] by construction — feedback_items was built by
+    enumerating chunk_comments in this exact order, so this is a direct
+    lookup, not a guess."""
+    for item in rec.output_json.get("item_results", []):
+        item_num = item.get("item")
+        if isinstance(item_num, int) and 1 <= item_num <= len(chunk_comments):
+            result.comment_reasoning[chunk_comments[item_num - 1]["id"]] = item.get("reasoning") or ""
+
+
 def regenerate_prose_document(
     source_lang: str,
     target_lang: str,
@@ -251,6 +270,7 @@ def regenerate_prose_document(
         )
         new_paragraphs[idx] = revised
         result.stage_records.append(rec)
+        _attribute_reasoning(result, chunk_comments, rec)
 
     result.paragraphs = new_paragraphs
     result.is_heading = list(current_is_heading)  # unchanged by regeneration
@@ -295,6 +315,7 @@ def regenerate_table_document(
         )
         new_rows[row][col] = revised
         result.stage_records.append(rec)
+        _attribute_reasoning(result, chunk_comments, rec)
 
     result.rows = new_rows
     return result
